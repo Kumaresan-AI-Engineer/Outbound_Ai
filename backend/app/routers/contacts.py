@@ -12,6 +12,7 @@ def serialize_contact(doc) -> dict:
         "id": str(doc["_id"]),
         "name": doc["name"],
         "phone": doc["phone"],
+        "secondary_phone": doc.get("secondary_phone", ""),
         "company": doc.get("company", ""),
         "status": doc.get("status", "new"),
         "notes": doc.get("notes", ""),

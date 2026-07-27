@@ -1,10 +1,13 @@
 import time
 import logging
 import uuid
+from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
-from app.routers import contacts, calls, ws, media_stream
+from app.routers import contacts, calls, ws, media_stream, clients, projects
+from app.database import ensure_indexes
 
 logger = logging.getLogger("outbound")
 logging.basicConfig(
@@ -59,8 +62,23 @@ app.include_router(contacts.router)
 app.include_router(calls.router)
 app.include_router(ws.router)
 app.include_router(media_stream.router)
+app.include_router(clients.router)
+app.include_router(projects.router)
+
+
+@app.on_event("startup")
+async def startup():
+    await ensure_indexes()
 
 
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+# Serve the built React app (frontend/dist) so the whole site is reachable
+# through this same backend origin - i.e. through the one ngrok tunnel.
+# Mounted last so it only catches requests the API routers above didn't.
+FRONTEND_DIST = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
+if FRONTEND_DIST.exists():
+    app.mount("/", StaticFiles(directory=str(FRONTEND_DIST), html=True), name="frontend")

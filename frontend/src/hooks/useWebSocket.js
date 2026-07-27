@@ -18,7 +18,7 @@ export function useWebSocket(callId) {
     }
 
     // Connect directly to backend, bypassing Vite proxy which kills WS connections
-    const url = `ws://localhost:8000/ws/call/${callId}`;
+    const url = `ws://localhost:8080/ws/call/${callId}`;
     console.log('[WS] Connecting to:', url);
     const ws = new WebSocket(url);
     wsRef.current = ws;

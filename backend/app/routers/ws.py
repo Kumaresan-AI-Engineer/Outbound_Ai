@@ -69,7 +69,7 @@ async def frontend_websocket(websocket: WebSocket, call_id: str):
             active_calls[call_id]["frontend_ws"] = None
 
 
-async def save_and_cleanup(call_id: str):
+async def save_and_cleanup(call_id: str, status: str = "completed"):
     """Save transcript to DB and remove from active_calls. Called when call truly ends."""
     call_data = active_calls.get(call_id)
     if call_data and call_data.get("transcript"):
@@ -83,10 +83,65 @@ async def save_and_cleanup(call_id: str):
             )
             logger.info(f"[WS] Saved transcript for call {call_id}")
             # Fire background post-call analysis
-            asyncio.create_task(_run_analysis(call_id, call_data["transcript"]))
+            asyncio.create_task(
+                _run_analysis(call_id, call_data["transcript"], call_data.get("contact_name", ""))
+            )
         except Exception as e:
             logger.error(f"[WS] Failed to save transcript for call {call_id}: {e}")
+    elif status == "failed":
+        # Never answered (no-answer/busy/rejected/canceled) - there's no
+        # transcript for the AI analyzer to work with, so the call would
+        # otherwise vanish with zero follow-up tracking. Auto-schedule one.
+        await _auto_schedule_unanswered_followup(call_id)
     active_calls.pop(call_id, None)
+
+
+def _suggest_reschedule(now: datetime) -> tuple[datetime, str]:
+    """Default follow-up target for an unanswered call: 2 days out, nudged
+    past the weekend to the following Monday rather than a Sat/Sun callback."""
+    target = now + timedelta(days=2)
+    if target.weekday() >= 5:  # Saturday=5, Sunday=6
+        target += timedelta(days=7 - target.weekday())
+        label = f"next Monday ({target.strftime('%b %d')})"
+    else:
+        label = f"in 2 days ({target.strftime('%b %d')})"
+    return target, label
+
+
+async def _auto_schedule_unanswered_followup(call_id: str) -> None:
+    """Rule-based follow-up for a call nobody picked up - no transcript
+    means the AI analyzer has nothing to work with, so this fills the same
+    analysis/follow_up shape by hand instead of letting the lead silently
+    drop off the radar."""
+    try:
+        doc = await call_logs_collection.find_one({"_id": ObjectId(call_id)})
+        if not doc or doc.get("analysis"):
+            return  # already analyzed (e.g. a retry that did connect)
+        contact_name = doc.get("contact_name") or "The client"
+        target_date, label = _suggest_reschedule(datetime.utcnow())
+        analysis = {
+            "summary": f"{contact_name} did not answer the call. Follow-up suggested {label}.",
+            "sentiment": "Neutral",
+            "quality_score": None,
+            "went_well": [],
+            "to_improve": [],
+            "action_items": [],
+            "follow_up_needed": True,
+            "follow_up_reason": f"{contact_name} did not answer the call",
+            "follow_up_date_suggestion": label,
+            "key_points": [],
+        }
+        await call_logs_collection.update_one(
+            {"_id": ObjectId(call_id)},
+            {"$set": {
+                "analysis": analysis,
+                "follow_up_date": target_date,
+                "follow_up_status": "pending",
+            }},
+        )
+        logger.info(f"[WS] Auto-scheduled follow-up for unanswered call {call_id}: {label}")
+    except Exception as e:
+        logger.error(f"[WS] Failed to auto-schedule follow-up for {call_id}: {e}")
 
 
 def _parse_follow_up_date(suggestion: str) -> datetime:
@@ -125,12 +180,12 @@ def _parse_follow_up_date(suggestion: str) -> datetime:
     return now + timedelta(days=3)
 
 
-async def _run_analysis(call_id: str, transcript: str):
+async def _run_analysis(call_id: str, transcript: str, contact_name: str = ""):
     """Run AI post-call analysis in background and save to DB."""
     from app.services.ai_service import analyze_call
     try:
         logger.info(f"[ANALYSIS] Starting post-call analysis for {call_id}")
-        analysis = await analyze_call(transcript)
+        analysis = await analyze_call(transcript, contact_name)
 
         update = {"analysis": analysis}
 

@@ -1,4 +1,5 @@
 import json
+import asyncio
 import logging
 from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import Response
@@ -16,6 +17,8 @@ from app.routers.ws import active_calls, save_and_cleanup
 logger = logging.getLogger(__name__)
 settings = get_settings()
 _analysis_in_progress: set = set()  # Guard against duplicate triggers
+_analysis_attempts: dict = {}  # call_id -> attempt count, caps retries on a persistently-failing call
+MAX_ANALYSIS_ATTEMPTS = 3
 
 
 router = APIRouter(prefix="/calls", tags=["calls"])
@@ -57,13 +60,25 @@ async def initiate(req: CallInitiateRequest):
     result = await call_logs_collection.insert_one(call_log)
     call_id = str(result.inserted_id)
 
-    # Pre-populate active_calls with contact name for transcript labeling
+    # Pre-populate active_calls with contact info for transcript labeling
+    # and the in-call suggestion agent
     active_calls[call_id] = {
         "frontend_ws": None,
         "transcript": "",
         "suggestions": [],
         "contact_name": contact["name"],
+        "contact_id": req.contact_id,
+        "interims": {},
+        "started_at": datetime.utcnow(),
+        "agent_cache": None,
+        "agent_pending": "",
+        "agent_running": False,
+        "agent_dirty": False,
     }
+
+    # Warm the agent's tool cache in the background
+    from app.services.suggestion_agent import prefetch_context
+    asyncio.create_task(prefetch_context(call_id, req.contact_id))
 
     return {"call_id": call_id, "status": "initiating"}
 
@@ -151,10 +166,10 @@ async def transcription_webhook(call_id: str, request: Request):
 
         # Detect speaker from track label
         track_lower = str(track).lower()
-        if "customer" in track_lower or "inbound" in track_lower:
-            speaker = contact_name
-        elif "agent" in track_lower or "outbound" in track_lower:
+        if "agent" in track_lower or "inbound" in track_lower:
             speaker = "You"
+        elif "customer" in track_lower or "outbound" in track_lower:
+            speaker = contact_name
         else:
             speaker = "Unknown"
 
@@ -177,7 +192,12 @@ async def transcription_webhook(call_id: str, request: Request):
 
 
 @router.post("/status/{call_id}")
-async def status_callback(call_id: str, CallStatus: str = Form(""), CallDuration: str = Form("0")):
+async def status_callback(
+    call_id: str, request: Request, CallStatus: str = Form(""), CallDuration: str = Form("0")
+):
+    form_data = await request.form()
+    logger.info(f"[STATUS] call={call_id} fields: {dict(form_data)}")
+
     status_map = {
         "initiated": "initiated",
         "ringing": "ringing",
@@ -189,6 +209,15 @@ async def status_callback(call_id: str, CallStatus: str = Form(""), CallDuration
         "failed": "failed",
     }
     mapped_status = status_map.get(CallStatus, CallStatus)
+    logger.info(f"[STATUS] call={call_id} CallStatus={CallStatus!r} -> mapped_status={mapped_status!r}")
+
+    # The live-poll endpoint reads this while the call is still in-flight -
+    # without it, /calls/live has no way to tell "ringing" apart from
+    # "genuinely answered" and was reporting a hardcoded "active" the whole
+    # time, which broke every downstream "was this call actually picked up?"
+    # check (including the secondary-number retry).
+    if call_id in active_calls:
+        active_calls[call_id]["twilio_status"] = mapped_status
 
     update = {"status": mapped_status}
     if CallDuration:
@@ -227,14 +256,14 @@ async def status_callback(call_id: str, CallStatus: str = Form(""), CallDuration
                 logger.error(f"[STATUS] Failed to notify frontend for call {call_id}: {e}")
 
     if mapped_status in ("completed", "failed"):
-        await save_and_cleanup(call_id)
+        await save_and_cleanup(call_id, mapped_status)
 
     return {"status": "ok"}
 
 
 @router.get("/live/{call_id}")
 async def get_live_transcript(call_id: str):
-    """Poll endpoint for live transcript and call status."""
+    """Poll endpoint for live transcript, call status, and client context."""
     call_data = active_calls.get(call_id)
     if call_data:
         # Build full text: committed transcript + any pending interims
@@ -244,11 +273,14 @@ async def get_live_transcript(call_id: str):
             interim_line = f"[{speaker}]: {text}"
             full += f"\n{interim_line}" if full else interim_line
 
+        agent_cache = call_data.get("agent_cache") or {}
         return {
             "transcript": full,
             "interims": interims,
             "suggestions": call_data.get("suggestions", []),
-            "status": "active",
+            "status": call_data.get("twilio_status") or "initiating",
+            "contact_profile": agent_cache.get("contact_profile"),
+            "relevant_projects": agent_cache.get("relevant_projects"),
         }
     # Fall back to DB if call ended
     doc = await call_logs_collection.find_one({"_id": ObjectId(call_id)})
@@ -258,8 +290,13 @@ async def get_live_transcript(call_id: str):
             "interims": {},
             "suggestions": doc.get("suggestions", []),
             "status": doc.get("status", "unknown"),
+            "contact_profile": None,
+            "relevant_projects": None,
         }
-    return {"transcript": "", "interims": {}, "suggestions": [], "status": "unknown"}
+    return {
+        "transcript": "", "interims": {}, "suggestions": [], "status": "unknown",
+        "contact_profile": None, "relevant_projects": None,
+    }
 
 
 @router.get("/analytics")
@@ -468,18 +505,26 @@ async def complete_follow_up(call_id: str):
 async def get_call_logs():
     logs = []
     async for doc in call_logs_collection.find().sort("created_at", -1).limit(50):
-        # If call completed with transcript but no analysis, trigger it now
+        # If call completed with transcript but no analysis, trigger it now -
+        # capped so a persistently-failing call (e.g. insufficient_quota,
+        # which never clears on retry) doesn't get re-attempted on every
+        # single poll to this endpoint forever.
         existing_analysis = doc.get("analysis")
         needs_analysis = not existing_analysis or existing_analysis.get("error")
+        call_id_str = str(doc["_id"])
         if (
             doc.get("status") == "completed"
             and doc.get("transcript")
             and needs_analysis
-            and str(doc["_id"]) not in _analysis_in_progress
+            and call_id_str not in _analysis_in_progress
+            and _analysis_attempts.get(call_id_str, 0) < MAX_ANALYSIS_ATTEMPTS
         ):
             import asyncio
-            _analysis_in_progress.add(str(doc["_id"]))
-            asyncio.create_task(_trigger_analysis(str(doc["_id"]), doc["transcript"]))
+            _analysis_in_progress.add(call_id_str)
+            _analysis_attempts[call_id_str] = _analysis_attempts.get(call_id_str, 0) + 1
+            asyncio.create_task(
+                _trigger_analysis(call_id_str, doc["transcript"], doc.get("contact_name", ""))
+            )
 
         logs.append({
             "id": str(doc["_id"]),
@@ -496,13 +541,13 @@ async def get_call_logs():
     return logs
 
 
-async def _trigger_analysis(call_id: str, transcript: str):
+async def _trigger_analysis(call_id: str, transcript: str, contact_name: str = ""):
     """Fallback: trigger analysis for completed calls that missed it."""
     from app.services.ai_service import analyze_call
     from app.routers.ws import _parse_follow_up_date
     try:
         logger.info(f"[ANALYSIS-FALLBACK] Triggering analysis for {call_id}")
-        analysis = await analyze_call(transcript)
+        analysis = await analyze_call(transcript, contact_name)
         update = {"analysis": analysis}
         if analysis.get("follow_up_needed"):
             update["follow_up_date"] = _parse_follow_up_date(analysis.get("follow_up_date_suggestion", ""))

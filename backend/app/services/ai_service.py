@@ -37,31 +37,32 @@ Keep suggestions concise and actionable. Respond in JSON format:
 }"""
 
 
-ANALYSIS_PROMPT = """You are an expert call analyst. Analyze this completed call transcript between a Business Agent and a prospect/customer.
+ANALYSIS_PROMPT = """You are an expert call analyst. Analyze this completed call transcript between a BA (Business Agent) and {client_name}, a prospect/customer.
 
 Return a JSON object with exactly these fields:
-{
-  "summary": "2-3 sentence summary of what happened in the call",
+{{
+  "summary": "2-3 sentence summary of what happened in the call - refer to the client by name ({client_name}), never as 'the prospect' or 'the client'",
   "sentiment": "Positive" or "Neutral" or "Negative",
   "quality_score": number from 1 to 10,
-  "went_well": ["things the agent did well"],
-  "to_improve": ["areas where the agent could improve"],
+  "went_well": ["things the BA did well"],
+  "to_improve": ["areas where the BA could improve"],
   "action_items": ["specific follow-up actions needed"],
   "follow_up_needed": true or false,
   "follow_up_reason": "why follow-up is needed (empty string if not needed)",
   "follow_up_date_suggestion": "suggested timeframe like 'in 2 days' or 'next week' (empty string if not needed)",
   "key_points": ["key topics and points discussed in the call"]
-}
+}}
 
-Be specific and actionable. Base everything on what was actually said in the transcript."""
+Use "BA" (not "agent") whenever referring to the caller, and use {client_name}'s actual name (not "the prospect"/"the client") whenever referring to them. Be specific and actionable. Base everything on what was actually said in the transcript."""
 
 
-async def analyze_call(transcript: str, provider: str = None) -> dict:
+async def analyze_call(transcript: str, contact_name: str = "", provider: str = None) -> dict:
     """Generate post-call analysis from the complete transcript."""
     provider = provider or settings.ai_provider
+    client_name = contact_name or "the client"
 
     messages = [
-        {"role": "system", "content": ANALYSIS_PROMPT},
+        {"role": "system", "content": ANALYSIS_PROMPT.format(client_name=client_name)},
         {"role": "user", "content": f"Call transcript:\n\n{transcript}\n\nAnalyze this call:"},
     ]
 

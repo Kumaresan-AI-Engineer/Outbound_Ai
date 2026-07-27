@@ -107,10 +107,26 @@
     0%, 100% { transform: translateY(0); }
     50% { transform: translateY(-4px); }
   }
+  @keyframes glow-breathe {
+    0%, 100% { opacity: 0.5; transform: scale(1); }
+    50% { opacity: 0.85; transform: scale(1.06); }
+  }
   .anim-enter { animation: enter 0.4s ease-out both; }
   .anim-modal { animation: modal-enter 0.35s cubic-bezier(0.16, 1, 0.3, 1) both; }
   .anim-pulse { animation: pulse-dot 2s ease-in-out infinite; }
   .anim-float { animation: float 3s ease-in-out infinite; }
+  .anim-glow-breathe { animation: glow-breathe 5s ease-in-out infinite; }
+  @media (prefers-reduced-motion: reduce) {
+    .anim-glow-breathe { animation: none; opacity: 0.7; }
+  }
+
+  /* Knowledge map canvas — faint dot grid gives the node-link diagram a
+     genuine "map" surface instead of empty white space. */
+  .map-canvas {
+    background-image: radial-gradient(circle, var(--color-gray-300) 1px, transparent 1px);
+    background-size: 22px 22px;
+    background-color: var(--color-gray-50);
+  }
   .delay-1 { animation-delay: 60ms; }
   .delay-2 { animation-delay: 120ms; }
   .delay-3 { animation-delay: 180ms; }

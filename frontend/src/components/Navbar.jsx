@@ -1,8 +1,9 @@
-import { LayoutDashboard, Users, History, Settings, Headphones, Wifi, WifiOff } from 'lucide-react';
+import { LayoutDashboard, Users, FolderKanban, History, Settings, Headphones, Wifi, WifiOff } from 'lucide-react';
 
 const navItems = [
   { icon: LayoutDashboard, label: 'Dashboard', id: 'dashboard' },
   { icon: Users, label: 'Contacts', id: 'contacts' },
+  { icon: FolderKanban, label: 'Projects', id: 'projects' },
   { icon: History, label: 'History', id: 'history' },
   { icon: Settings, label: 'Settings', id: 'settings' },
 ];

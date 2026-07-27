@@ -4,6 +4,8 @@ export function useCallPolling(callId) {
   const [transcript, setTranscript] = useState([]);
   const [suggestion, setSuggestion] = useState(null);
   const [callStatus, setCallStatus] = useState('connecting');
+  const [contactProfile, setContactProfile] = useState(null);
+  const [relevantProjects, setRelevantProjects] = useState(null);
   const intervalRef = useRef(null);
   const lastTranscriptRef = useRef('');
   const lastInterimsRef = useRef('');
@@ -22,6 +24,28 @@ export function useCallPolling(callId) {
         if (!res.ok) return;
         const data = await res.json();
 
+        // Status, suggestions, and client context must be evaluated on every
+        // tick, independent of whether the transcript changed - a silent
+        // (no-answer) call never touches transcript/interims but still needs
+        // its terminal status to land, and a suggestion can arrive on a tick
+        // where transcript has already gone quiet while the LLM call ran.
+        // 'in_progress' only ever lands once Twilio's own "answered" event
+        // fires for the callee leg - it's the one value that means a human
+        // actually picked up. 'initiated'/'initiating' are left alone (stay
+        // at the default 'connecting') since nothing meaningful has happened yet.
+        if (data.status === 'in_progress' || data.status === 'ringing') setCallStatus(data.status);
+        else if (data.status === 'completed' || data.status === 'failed') setCallStatus(data.status);
+
+        if (data.suggestions?.length > 0) {
+          const latest = data.suggestions[data.suggestions.length - 1];
+          if (typeof latest === 'object') setSuggestion(latest);
+        }
+
+        setContactProfile(data.contact_profile ?? null);
+        setRelevantProjects(data.relevant_projects ?? null);
+
+        // Transcript entries: keep the diff-check as a pure perf guard around
+        // the (re-)parsing + re-render, not around anything correctness-critical.
         const interimsKey = JSON.stringify(data.interims || {});
         const changed = data.transcript !== lastTranscriptRef.current || interimsKey !== lastInterimsRef.current;
         if (!changed) return;
@@ -57,17 +81,7 @@ export function useCallPolling(callId) {
         }
 
         setTranscript(entries);
-
-        // Update suggestion
-        if (data.suggestions?.length > 0) {
-          const latest = data.suggestions[data.suggestions.length - 1];
-          if (typeof latest === 'object') setSuggestion(latest);
-        }
-
-        // Update status
-        if (data.status === 'active') setCallStatus('in_progress');
-        else if (data.status === 'completed' || data.status === 'failed') setCallStatus(data.status);
-      } catch (err) {
+      } catch {
         // Silently ignore
       }
     };
@@ -96,6 +110,8 @@ export function useCallPolling(callId) {
     transcript,
     suggestion,
     callStatus,
+    contactProfile,
+    relevantProjects,
     connected: true,
     setCallStatus,
   };

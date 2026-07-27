@@ -4,13 +4,24 @@ import { Device } from '@twilio/voice-sdk';
 export function useTwilioDevice() {
   const deviceRef = useRef(null);
   const callRef = useRef(null);
+  // Bumped on every initDevice() call - React StrictMode deliberately
+  // double-invokes mount effects in dev, and since initDevice is async, a
+  // superseded call must recognize it lost the race and tear itself down
+  // instead of racing the newer one for deviceRef.current.
+  const initGenerationRef = useRef(0);
   const [deviceReady, setDeviceReady] = useState(false);
   const [callState, setCallState] = useState('idle');
 
   const initDevice = useCallback(async () => {
+    const myGeneration = ++initGenerationRef.current;
     try {
       const res = await fetch('/calls/token');
       const { token } = await res.json();
+
+      if (myGeneration !== initGenerationRef.current) {
+        console.log('[Twilio Device] Superseded before token resolved - abandoning init');
+        return;
+      }
 
       if (deviceRef.current) {
         deviceRef.current.destroy();
@@ -29,6 +40,7 @@ export function useTwilioDevice() {
       });
 
       device.on('registered', () => {
+        if (myGeneration !== initGenerationRef.current) return;
         console.log('[Twilio Device] Ready');
         setDeviceReady(true);
       });
@@ -49,6 +61,14 @@ export function useTwilioDevice() {
       });
 
       device.register();
+
+      if (myGeneration !== initGenerationRef.current) {
+        // Superseded while registering - discard this one instead of
+        // leaving it as an orphaned, still-registered Device.
+        console.log('[Twilio Device] Superseded after register() - destroying');
+        device.destroy();
+        return;
+      }
       deviceRef.current = device;
     } catch (err) {
       console.error('[Twilio Device] Init failed:', err);

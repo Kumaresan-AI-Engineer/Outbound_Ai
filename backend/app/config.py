@@ -21,7 +21,9 @@ class Settings(BaseSettings):
     whisper_model: str = "small"
     whisper_device: str = "cpu"  # "cpu" or "cuda"
     ai_provider: str = "groq"  # "groq" or "openai"
-    base_url: str = "http://localhost:8000"
+    transcription_provider: str = "deepgram"  # "deepgram" or "groq_whisper"
+    suggestion_agent_enabled: bool = True
+    base_url: str = "http://localhost:8080"
 
     class Config:
         env_file = str(BACKEND_DIR / ".env")

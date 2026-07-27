@@ -242,19 +242,6 @@ export default function CallHistory() {
               </button>
               {expanded === log.id && (
                 <div className="px-6 pb-5 border-t border-gray-100 anim-enter">
-                  {/* Transcript */}
-                  {log.transcript && (
-                    <div className="mt-4">
-                      <div className="flex items-center gap-2 mb-2.5">
-                        <FileText className="w-3.5 h-3.5 text-gray-400" />
-                        <span className="text-[12px] font-bold text-gray-400 uppercase tracking-wider">Transcript</span>
-                      </div>
-                      <div className="text-[13px] text-gray-600 leading-[1.8] whitespace-pre-wrap bg-gray-50 p-5 rounded-xl border border-gray-100 font-mono">
-                        {log.transcript}
-                      </div>
-                    </div>
-                  )}
-
                   {/* Analysis */}
                   {log.status === 'completed' && (!log.analysis || log.analysis.error) && (
                     <div className="mt-5 flex items-center gap-2.5 text-gray-400">
