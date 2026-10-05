@@ -1,13 +1,19 @@
-import time
 import logging
+import time
 import uuid
+from datetime import datetime
 from pathlib import Path
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
-from app.routers import contacts, calls, ws, media_stream, clients, projects
+
+from app.config import get_settings
+from app.core.security import hash_password
 from app.database import ensure_indexes
+from app.repositories.users_repo import users_repo
+from app.routers import auth, calls, clients, contacts, media_stream, projects, twilio_numbers, users, ws
 
 logger = logging.getLogger("outbound")
 logging.basicConfig(
@@ -58,6 +64,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(auth.router)
+app.include_router(users.router)
+app.include_router(twilio_numbers.router)
 app.include_router(contacts.router)
 app.include_router(calls.router)
 app.include_router(ws.router)
@@ -66,9 +75,33 @@ app.include_router(clients.router)
 app.include_router(projects.router)
 
 
+async def ensure_bootstrap_admin():
+    """Create the first admin account on startup if no users exist yet -
+    there's no other way to log into a brand-new deployment before the
+    admin UI has any accounts to show."""
+    if await users_repo.count_documents({}) > 0:
+        return
+    settings = get_settings()
+    await users_repo.insert_one(
+        {
+            "name": settings.bootstrap_admin_name,
+            "email": settings.bootstrap_admin_email.lower().strip(),
+            "password_hash": hash_password(settings.bootstrap_admin_password),
+            "role": "admin",
+            "is_active": True,
+            "created_at": datetime.utcnow(),
+        }
+    )
+    logger.warning(
+        f"[BOOTSTRAP] No users found - created initial admin account "
+        f"({settings.bootstrap_admin_email}). Log in and change this password."
+    )
+
+
 @app.on_event("startup")
 async def startup():
     await ensure_indexes()
+    await ensure_bootstrap_admin()
 
 
 @app.get("/health")

@@ -24,6 +24,10 @@ class DeepgramTranscriber:
         self.ws = None
         self._running = False
         self._keepalive_task = None
+        # TEMP DIAGNOSTIC - remove once the empty-transcript issue is root-caused
+        self._frames_sent = 0
+        self._bytes_sent = 0
+        self._results_received = 0
 
     @property
     def is_running(self) -> bool:
@@ -67,7 +71,8 @@ class DeepgramTranscriber:
         try:
             async for message in self.ws:
                 data = json.loads(message)
-                if data.get("type") == "Results":
+                msg_type = data.get("type")
+                if msg_type == "Results":
                     transcript = (
                         data.get("channel", {})
                         .get("alternatives", [{}])[0]
@@ -75,13 +80,29 @@ class DeepgramTranscriber:
                     )
                     is_final = data.get("is_final", False)
                     speech_final = data.get("speech_final", False)
+                    self._results_received += 1
+                    # TEMP DIAGNOSTIC - shapes only, never the spoken text itself
+                    logger.info(
+                        f"[DEEPGRAM-DEBUG] Results #{self._results_received}: "
+                        f"is_final={is_final} speech_final={speech_final} "
+                        f"text_len={len(transcript)} has_text={bool(transcript)}"
+                    )
                     if transcript or speech_final:
                         await self.on_transcript(transcript, is_final, speech_final)
-                elif data.get("type") == "UtteranceEnd":
+                elif msg_type == "UtteranceEnd":
+                    logger.info("[DEEPGRAM-DEBUG] UtteranceEnd received")
                     # Safety net when speech_final never fires (noisy audio)
                     await self.on_transcript("", False, True)
-        except websockets.exceptions.ConnectionClosed:
-            logger.info("[DEEPGRAM] Connection closed")
+                else:
+                    # TEMP DIAGNOSTIC - catches error/warning/metadata messages that
+                    # were previously silently dropped by this elif chain
+                    logger.info(f"[DEEPGRAM-DEBUG] Unhandled message type={msg_type!r} raw={str(data)[:300]}")
+        except websockets.exceptions.ConnectionClosed as e:
+            logger.info(
+                f"[DEEPGRAM-DEBUG] Connection closed: code={getattr(e, 'code', None)} "
+                f"reason={getattr(e, 'reason', None)!r} "
+                f"(frames_sent={self._frames_sent}, bytes_sent={self._bytes_sent}, results_received={self._results_received})"
+            )
         except Exception as e:
             logger.error(f"[DEEPGRAM] Receive error: {e}")
         finally:
@@ -91,11 +112,24 @@ class DeepgramTranscriber:
         if self.ws and self._running:
             try:
                 await self.ws.send(audio_data)
+                # TEMP DIAGNOSTIC
+                self._frames_sent += 1
+                self._bytes_sent += len(audio_data)
+                if self._frames_sent % 100 == 0:
+                    logger.info(
+                        f"[DEEPGRAM-DEBUG] Sent {self._frames_sent} frames "
+                        f"({self._bytes_sent} bytes) so far, {self._results_received} Results received"
+                    )
             except Exception as e:
                 logger.error(f"[DEEPGRAM] Send error: {e}")
                 self._running = False
 
     async def close(self):
+        # TEMP DIAGNOSTIC - final tally for this track's connection
+        logger.info(
+            f"[DEEPGRAM-DEBUG] Closing: frames_sent={self._frames_sent} "
+            f"bytes_sent={self._bytes_sent} results_received={self._results_received}"
+        )
         self._running = False
         if self._keepalive_task:
             self._keepalive_task.cancel()

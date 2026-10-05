@@ -9,18 +9,25 @@
 
 # OutboundAI — Browser-Based Outbound Call Assistant
 
-> Make outbound calls directly from your browser with **real-time AI transcription**, **post-call analysis**, **smart follow-up reminders**, and a **full analytics dashboard** — all powered by Groq AI.
+> Make outbound calls directly from your browser with **role-based auth**, **multi-number calling**, **real-time AI transcription and coaching**, **post-call analysis**, **smart follow-up reminders**, and a **full analytics dashboard** — powered by Deepgram and your choice of Groq or OpenAI.
 
 ---
 
 ## Features
 
 - **Browser-Based Calling** — Make VoIP calls directly from the browser using Twilio Client SDK. No phone or softphone needed.
-- **Real-Time Transcription** — Live speech-to-text powered by Groq Whisper large-v3, displayed as the call happens.
-- **AI Post-Call Analysis** — Automatic call analysis with sentiment, quality score, action items, and follow-up suggestions using Llama 3.3-70B.
-- **Smart Follow-Up Reminders** — AI suggests follow-up dates, the system parses them into real dates and shows reminders on your dashboard.
+- **Role-Based Auth** — JWT login with `admin`/`sales` roles; a bootstrap admin account is created automatically on first startup.
+- **Multi-Number Calling** — Admins maintain a pool of Twilio numbers and assign them (many-to-many) to sales users; each outbound call automatically uses the calling user's assigned caller ID, falling back to a default number if none is assigned.
+- **Power Dialer** — Select a batch of contacts and auto-dial through them sequentially, with pause/resume/skip and automatic secondary-number retry on no-answer.
+- **Real-Time Transcription** — Live speech-to-text via Deepgram streaming (falling back to batched Groq Whisper if Deepgram is unavailable), with a Live Transcript panel shown during the call.
+- **In-Call AI Coaching** — Live suggestions (next talking point, objection handling, sentiment, relevant past-project recommendations) as the conversation happens.
+- **AI Post-Call Analysis** — Automatic call analysis with sentiment, quality score, action items, and follow-up suggestions.
+- **Smart Follow-Up Reminders** — AI suggests follow-up dates, the system parses them into real dates and shows reminders on your dashboard — including for calls nobody answered.
+- **Excel Contact Import** — Bulk-import contacts from a spreadsheet, with a country-code selector applied to any number that doesn't already include one.
+- **Company Project Knowledge Base** — Upload past project documents (PDF/DOCX); an AI agent extracts domain, tech stack, and summary, and matches them to imported clients for use in live coaching.
 - **Analytics Dashboard** — Call volume charts, sentiment breakdown, quality trends, top action items, and AI-generated weekly summaries.
 - **Contact Management** — Full CRUD for contacts with status tracking, call history, and notes.
+- **Timezone-Aware Timestamps** — API responses convert stored UTC timestamps to the browser's local timezone automatically.
 
 ---
 
@@ -57,85 +64,93 @@
 
 ```mermaid
 flowchart LR
-    A[Browser] -->|Twilio Client SDK| B[Twilio Cloud]
-    B -->|Dials| C[Contact Phone]
+    A[Browser] -->|Login - JWT| A
+    A -->|Twilio Client SDK| B[Twilio Cloud]
+    B -->|Dials, using the caller's assigned number| C[Contact Phone]
     B -->|Media Stream WSS| D[Backend - FastAPI]
-    D -->|Audio Bytes| E[Groq Whisper API]
+    D -->|Audio| E[Deepgram / Groq Whisper]
     E -->|Text| D
-    D -->|Live Transcript| A
-    D -->|Call Ends| F[Groq Llama 3.3 AI]
+    D -->|Live Transcript + AI Coaching| A
+    D -->|Call Ends| F[AI Analysis - Groq/OpenAI]
     F -->|Analysis JSON| D
     D -->|Stores| G[(MongoDB)]
 ```
 
-1. You add contacts and click **"Call"** in the browser
-2. The browser uses **Twilio Client SDK** to connect the call through Twilio's cloud
-3. Twilio dials the contact's phone number and streams the audio back to your server
-4. Your server sends audio chunks to **Groq Whisper** for real-time speech-to-text
-5. The live transcript appears in the browser as you talk
-6. When the call ends, **Groq Llama 3.3-70B** analyzes the full conversation
-7. You get a detailed report: sentiment, quality score, action items, follow-up suggestions
-8. If AI says follow-up is needed, it schedules a reminder on your dashboard
+1. You log in (JWT, `admin` or `sales` role)
+2. You add/import contacts and click **"Call"** (or select several and start a **Power Dial** session)
+3. The browser uses **Twilio Client SDK** to connect the call through Twilio's cloud, identified as you — the backend resolves this to your admin-assigned Twilio number as the caller ID
+4. Twilio dials the contact's phone number and streams the audio back to your server
+5. Your server streams audio to **Deepgram** (or Groq Whisper as a fallback) for real-time speech-to-text
+6. The live transcript and in-call AI coaching suggestions appear in the browser as you talk
+7. When the call ends, the configured AI provider (Groq or OpenAI) analyzes the full conversation
+8. You get a detailed report: sentiment, quality score, action items, follow-up suggestions
+9. If AI says follow-up is needed (or the call wasn't answered), it schedules a reminder on your dashboard
 
 ---
 
 ## Architecture
 
+Backend code is layered: `routers/` (HTTP/WebSocket only) → `domain/` services and `ai/agents/` → `repositories/` (one per collection) → MongoDB. AI agents never talk to a Groq/OpenAI SDK directly — they go through a shared `LLMProvider` abstraction in `ai/providers/`, so switching providers or models is a settings change, not a code change.
+
 ```mermaid
 graph TB
-    subgraph Frontend ["Frontend (React + Vite)"]
+    subgraph Frontend ["Frontend (React + Vite) - features/* + shared/"]
         UI[App.jsx]
-        NAV[Navbar]
-        DASH[Dashboard]
-        CT[ContactTable]
-        CP[CallPanel]
-        CH[CallHistory]
-        SP[SettingsPanel]
-        TD[useTwilioDevice Hook]
+        AUTH_FE[auth - Login, AuthContext]
+        NAV[Navbar / role-gated nav]
+        DASH[dashboard]
+        CT[contacts - ContactTable]
+        CP[calls - CallPanel incl. Live Transcript]
+        CH[history - CallHistory]
+        ADMIN[admin - Users, Twilio Numbers]
+        PROJ[projects - ProjectsPanel, KnowledgeGraph]
         POLL[useCallPolling Hook]
     end
 
-    subgraph Backend ["Backend (FastAPI)"]
+    subgraph Backend ["Backend (FastAPI, layered)"]
+        AUTHR[auth.py / users.py / twilio_numbers.py]
         CALLS[calls.py Router]
-        CONTACTS[contacts.py Router]
-        WS[ws.py - WebSocket + Analysis]
+        CONTACTS[contacts.py / clients.py / projects.py]
+        WS[ws.py - frontend WebSocket]
         MS[media_stream.py - Audio Handler]
-        AI[ai_service.py]
-        WHISPER[whisper_service.py]
-        TWILIO_SVC[twilio_service.py]
+        DOMAIN[domain/calls - active call state, save/analysis]
+        AGENTS[ai/agents - analysis, suggestion, client_domain, project_extraction]
+        PROVIDERS[ai/providers - LLMProvider: Groq / OpenAI]
+        REPOS[repositories/* - one per Mongo collection]
     end
 
     subgraph External ["External Services"]
         TWILIO[Twilio Voice Cloud]
-        GROQ_W[Groq Whisper API]
-        GROQ_L[Groq Llama 3.3 70B]
+        DEEPGRAM[Deepgram - primary STT]
+        GROQ_W[Groq Whisper - fallback STT]
+        LLM[Groq / OpenAI - analysis + coaching]
         MONGO[(MongoDB)]
     end
 
-    UI --> NAV & DASH & CT & CP & CH & SP
-    TD -->|Access Token| CALLS
-    TD -->|SIP Call| TWILIO
+    UI --> AUTH_FE & NAV & DASH & CT & CP & CH & ADMIN & PROJ
+    AUTH_FE -->|JWT| AUTHR
+    CP -->|Twilio Device, identity = user id| TWILIO
     POLL -->|HTTP Poll /calls/live| CALLS
     CT -->|CRUD| CONTACTS
-    CP -->|Live Data| POLL
-    DASH -->|Analytics| CALLS
+    ADMIN -->|CRUD + assign| AUTHR
 
-    TWILIO -->|TwiML Webhook| CALLS
+    TWILIO -->|TwiML Webhook, signature-verified| CALLS
     TWILIO -->|Media Stream WSS| MS
-    MS -->|mulaw audio| WHISPER
-    WHISPER -->|HTTP| GROQ_W
-    WS -->|Post-call| AI
-    AI -->|HTTP| GROQ_L
-    CALLS --> MONGO
-    WS --> MONGO
-    CONTACTS --> MONGO
+    MS -->|audio| DEEPGRAM
+    MS -.fallback.-> GROQ_W
+    CALLS --> DOMAIN
+    DOMAIN --> AGENTS
+    AGENTS --> PROVIDERS
+    PROVIDERS -->|HTTP| LLM
+    CALLS & CONTACTS & AUTHR & DOMAIN --> REPOS
+    REPOS --> MONGO
 ```
 
 ---
 
 ## Call Flow - Step by Step
 
-Complete lifecycle of a call from button click to analysis report.
+Complete lifecycle of a call from button click to analysis report. (All `/calls/*` REST calls below require a valid JWT; the diagram omits the `Authorization` header on each request for brevity. `GET /calls/token` mints the Twilio Access Token with your user id as its identity, which `/calls/twiml-app` later resolves back to your admin-assigned Twilio number as the caller ID.)
 
 ```mermaid
 sequenceDiagram
@@ -199,7 +214,7 @@ sequenceDiagram
 
 ## Real-Time Transcription Flow
 
-How audio goes from a phone call to text on your screen.
+How audio goes from a phone call to text on your screen. **Deepgram streaming is the primary transcription path** (near-instant, word-by-word) when `TRANSCRIPTION_PROVIDER=deepgram` and a Deepgram key is configured; the diagram below shows the **Groq Whisper fallback path**, used automatically if Deepgram is unavailable, unconfigured, or drops mid-call.
 
 ```mermaid
 flowchart TD
@@ -257,10 +272,10 @@ flowchart TD
     B --> C[Save transcript to MongoDB]
     B --> D["asyncio.create_task(_run_analysis)"]
 
-    D --> E[analyze_call - ai_service.py]
+    D --> E[analyze_call - ai/agents/analysis_agent.py]
     E --> F{AI Provider?}
-    F -->|Groq| G[Groq Llama 3.3-70B]
-    F -->|OpenAI| H[GPT-4o]
+    F -->|Groq| G[Model from GROQ_MODEL]
+    F -->|OpenAI| H[Model from OPENAI_MODEL]
 
     G --> I[Returns structured JSON]
     H --> I
@@ -398,9 +413,11 @@ Click **"Generate"** to get an AI summary of the week's calls — includes headl
 |-----------|---------|
 | [FastAPI](https://fastapi.tiangolo.com/) | Async web framework |
 | [Motor](https://motor.readthedocs.io/) | Async MongoDB driver |
-| [Twilio SDK](https://www.twilio.com/docs/voice) | Voice API, TwiML, access tokens |
-| [Groq API](https://groq.com/) | Whisper STT + Llama 3.3 AI analysis |
-| [OpenAI API](https://platform.openai.com/) | Alternative AI provider (GPT-4o) |
+| [Twilio SDK](https://www.twilio.com/docs/voice) | Voice API, TwiML, access tokens, webhook signature verification |
+| [Deepgram](https://deepgram.com/) | Primary real-time streaming speech-to-text |
+| [Groq API](https://groq.com/) | Whisper STT fallback + AI analysis/coaching (model configurable via `.env`) |
+| [OpenAI API](https://platform.openai.com/) | Alternative AI provider |
+| [PyJWT](https://pyjwt.readthedocs.io/) + [passlib](https://passlib.readthedocs.io/)/bcrypt | JWT auth + password hashing |
 
 ### Frontend
 
@@ -424,41 +441,52 @@ Click **"Generate"** to get an AI summary of the week's calls — includes headl
 ## Project Structure
 
 ```
-outbound/
+Outbound_Ai/
 ├── backend/
 │   ├── app/
-│   │   ├── main.py                # FastAPI app, CORS, routers
-│   │   ├── config.py              # Settings from .env
-│   │   ├── database.py            # MongoDB connection
-│   │   ├── models/
-│   │   │   └── schemas.py         # Pydantic models
+│   │   ├── main.py                     # FastAPI app, CORS, router registration, bootstrap admin
+│   │   ├── config.py                   # Settings from .env (incl. model names, JWT, bootstrap admin)
+│   │   ├── database.py                 # MongoDB connection + collections + indexes
+│   │   ├── models/schemas.py           # Pydantic request/response models
+│   │   ├── core/
+│   │   │   ├── security.py             # JWT, password hashing, get_current_user/require_role
+│   │   │   ├── twilio_security.py      # Twilio webhook signature verification
+│   │   │   └── timezone.py             # UTC → client-timezone conversion for API responses
+│   │   ├── domain/calls/               # In-memory active-call state, save/analysis orchestration
+│   │   ├── ai/
+│   │   │   ├── providers/              # Shared LLMProvider abstraction (Groq, OpenAI)
+│   │   │   ├── agents/                 # analysis, suggestion, client_domain, project_extraction
+│   │   │   ├── prompts/ , schemas/, tools/
+│   │   ├── repositories/               # One repository per MongoDB collection
 │   │   ├── routers/
-│   │   │   ├── calls.py           # Call endpoints, analytics, follow-ups
-│   │   │   ├── contacts.py        # Contact CRUD
-│   │   │   ├── ws.py              # WebSocket, analysis, date parsing
-│   │   │   └── media_stream.py    # Twilio audio stream handler
-│   │   └── services/
-│   │       ├── ai_service.py      # Groq/OpenAI AI functions
-│   │       ├── whisper_service.py # Audio → text via Groq Whisper
-│   │       └── twilio_service.py  # TwiML generation
+│   │   │   ├── auth.py                 # Login, /auth/me
+│   │   │   ├── users.py                # Admin: user CRUD
+│   │   │   ├── twilio_numbers.py       # Admin: number pool + assignment
+│   │   │   ├── calls.py                # Call lifecycle, analytics, follow-ups
+│   │   │   ├── contacts.py             # Contact CRUD
+│   │   │   ├── clients.py              # Excel bulk import + enrichment
+│   │   │   ├── projects.py             # Project document upload + knowledge graph
+│   │   │   ├── ws.py                   # Frontend WebSocket
+│   │   │   └── media_stream.py         # Twilio audio stream handler (Deepgram/Groq Whisper)
+│   │   └── services/                   # Deepgram/Whisper/Twilio/document integrations
+│   ├── tests/
 │   ├── requirements.txt
-│   └── .env                       # ⚠️ Not committed (in .gitignore)
+│   └── .env                            # ⚠️ Not committed (in .gitignore)
 ├── frontend/
 │   ├── src/
-│   │   ├── App.jsx                # Main layout + routing
-│   │   ├── index.css              # Tailwind theme + custom effects
-│   │   ├── components/
-│   │   │   ├── Navbar.jsx         # Top navigation bar
-│   │   │   ├── Dashboard.jsx      # Analytics + follow-ups + weekly summary
-│   │   │   ├── ContactTable.jsx   # Contact list + call initiation
-│   │   │   ├── CallPanel.jsx      # Active call UI with live transcript
-│   │   │   ├── CallHistory.jsx    # Call logs with AI analysis
-│   │   │   └── SettingsPanel.jsx  # AI provider settings
-│   │   └── hooks/
-│   │       ├── useTwilioDevice.js # Twilio Device management
-│   │       └── useCallPolling.js  # Live transcript polling
+│   │   ├── App.jsx                     # Top-level state machine + page routing
+│   │   ├── services/apiClient.js       # Auth-header + X-Timezone fetch wrapper
+│   │   ├── features/
+│   │   │   ├── auth/                   # Login, AuthContext
+│   │   │   ├── admin/                  # UserManagement, TwilioNumbersPanel
+│   │   │   ├── calls/                  # CallPanel (incl. Live Transcript), PowerDialer*, hooks
+│   │   │   ├── contacts/               # ContactTable + Excel import
+│   │   │   ├── dashboard/, history/, projects/, settings/
+│   │   └── shared/                     # Navbar, Sidebar, useDraggable, domainColors
 │   ├── index.html
 │   └── package.json
+├── sample_data/                        # Test fixtures (e.g. sample Excel import files)
+├── CLAUDE.md / CODING_STANDARDS.md / SESSION_LOG.md   # AI-agent + contributor reference docs
 ├── .gitignore
 └── README.md
 ```
@@ -479,21 +507,21 @@ outbound/
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/kumaresan-Ai-Dev/outbound.git
-cd outbound
+git clone https://github.com/Kumaresan-AI-Engineer/Outbound_Ai.git
+cd Outbound_Ai
 ```
 
 ### 2. Backend setup
 
 ```bash
 cd backend
-python -m venv ../venv
+python -m venv .venv
 
 # Activate virtual environment
 # Linux/Mac:
-source ../venv/bin/activate
+source .venv/bin/activate
 # Windows:
-..\venv\Scripts\activate
+.venv\Scripts\activate
 
 pip install -r requirements.txt
 ```
@@ -512,10 +540,10 @@ Create `backend/.env` with your credentials (see [Environment Variables](#enviro
 ### 5. Start ngrok
 
 ```bash
-ngrok http 8000
+ngrok http 8080
 ```
 
-Copy the HTTPS URL (e.g., `https://xxxx-xx-xx.ngrok-free.app`) and set it as `BASE_URL` in your `.env`.
+Copy the HTTPS URL (e.g., `https://xxxx-xx-xx.ngrok-free.app`) and set it as `BASE_URL` in your `.env`. (On Windows, `run.bat` from the repo root automates this whole step via `scripts/sync-ngrok.ps1` — see below.)
 
 ### 6. Configure Twilio
 
@@ -530,7 +558,7 @@ Copy the HTTPS URL (e.g., `https://xxxx-xx-xx.ngrok-free.app`) and set it as `BA
 **Terminal 1 — Backend:**
 ```bash
 cd backend
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8080
 ```
 
 **Terminal 2 — Frontend:**
@@ -539,11 +567,62 @@ cd frontend
 npm run dev
 ```
 
-Open **http://localhost:5173** in your browser.
+Open **http://localhost:5173** in your browser. On first startup with an empty `users` collection, the backend auto-creates a bootstrap admin account from `BOOTSTRAP_ADMIN_EMAIL`/`BOOTSTRAP_ADMIN_PASSWORD` (defaults: `admin@outboundai.local` / `ChangeMe123!`, configurable in `.env`) — log in with that first, then add real users and assign Twilio numbers under **Users**/**Numbers** (admin-only nav items).
+
+### Windows one-click alternative
+
+From the repo root, `run.bat` starts MongoDB, opens the ngrok tunnel, syncs `BASE_URL` + the Twilio TwiML App automatically, then starts both the backend (port 8080) and frontend.
 
 ---
 
 ## API Reference
+
+All endpoints below require a JWT (`Authorization: Bearer <token>`) except `/auth/login`, `/health`, and the Twilio-facing webhooks (which are instead verified via `X-Twilio-Signature`).
+
+### Auth — `/auth`
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/auth/login` | Email/password login, returns a JWT + user profile |
+| `GET` | `/auth/me` | Current user's profile |
+
+### Users — `/users` (admin only)
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/users/` | List all users |
+| `POST` | `/users/` | Create a user (`admin` or `sales` role) |
+| `PUT` | `/users/{id}` | Update name/email/password/role/active state |
+| `DELETE` | `/users/{id}` | Delete a user |
+
+### Twilio Numbers — `/twilio-numbers` (admin only)
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/twilio-numbers/` | List the number pool with current assignments |
+| `POST` | `/twilio-numbers/` | Add a number (validated against Twilio before adding) |
+| `PUT` | `/twilio-numbers/{id}` | Update label / active state |
+| `POST` | `/twilio-numbers/{id}/assign` | Add or remove a user assignment (many-to-many) |
+| `DELETE` | `/twilio-numbers/{id}` | Delete a number |
+
+### Clients — `/clients` (Excel import)
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/clients/upload` | Bulk-import clients from an `.xlsx` file (`country_code` form field applies to numbers missing one) |
+| `GET` | `/clients/` | List imported clients with AI domain classification |
+| `DELETE` | `/clients/{id}` | Delete a client |
+
+### Projects — `/projects` (knowledge base)
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/projects/upload` | Upload a PDF/DOCX case study for AI extraction |
+| `GET` | `/projects/` | List all projects |
+| `GET` | `/projects/{id}` | Get one project's full extracted metadata |
+| `GET` | `/projects/graph` | Projects grouped by domain (Knowledge Map) |
+| `POST` | `/projects/{id}/reprocess` | Retry AI processing for a failed project |
+| `DELETE` | `/projects/{id}` | Delete a project |
 
 ### Calls — `/calls`
 
@@ -575,7 +654,7 @@ Open **http://localhost:5173** in your browser.
 
 | Endpoint | Description |
 |----------|-------------|
-| `WS /ws/call/{call_id}` | Frontend WebSocket for live updates |
+| `WS /ws/call/{call_id}` | Frontend WebSocket for live updates (scoped only by the random `call_id`, not JWT-authenticated — a deliberate trade-off, not an oversight) |
 | `WS /calls/media-stream/{call_id}` | Twilio audio stream for transcription |
 
 ---
@@ -589,9 +668,11 @@ Open **http://localhost:5173** in your browser.
   "_id": "ObjectId",
   "name": "John Doe",
   "phone": "+1234567890",
+  "secondary_phone": "+1234567891",
   "company": "Acme Corp",
   "status": "new | called | follow_up | closed",
   "notes": "Interested in enterprise plan",
+  "assigned_to": "user ObjectId or null - set to the first sales user who calls this contact",
   "last_called": "2026-03-15T10:30:00Z",
   "created_at": "2026-03-10T08:00:00Z"
 }
@@ -605,6 +686,7 @@ Open **http://localhost:5173** in your browser.
   "contact_id": "abc123",
   "contact_name": "John Doe",
   "phone": "+1234567890",
+  "user_id": "ObjectId of the sales user who placed the call",
   "status": "completed",
   "duration": 245,
   "transcript": "[You]: Hi John...\n[John Doe]: Hello...",
@@ -628,6 +710,35 @@ Open **http://localhost:5173** in your browser.
 }
 ```
 
+### `users` collection
+
+```json
+{
+  "_id": "ObjectId",
+  "name": "Jane Sales",
+  "email": "jane@example.com",
+  "password_hash": "bcrypt hash",
+  "role": "admin | sales",
+  "is_active": true,
+  "assigned_number_ids": ["twilio_numbers ObjectId", "..."],
+  "created_at": "2026-03-10T08:00:00Z"
+}
+```
+
+### `twilio_numbers` collection
+
+```json
+{
+  "_id": "ObjectId",
+  "phone_number": "+1XXXXXXXXXX",
+  "label": "East Coast Sales",
+  "is_active": true,
+  "created_at": "2026-03-10T08:00:00Z"
+}
+```
+
+> `clients` and `projects` collections (Excel-imported leads and the project knowledge base) are documented in `PROJECT_OVERVIEW.md`.
+
 ---
 
 ## Environment Variables
@@ -638,15 +749,30 @@ Create `backend/.env`:
 # Twilio
 TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 TWILIO_AUTH_TOKEN=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-TWILIO_PHONE_NUMBER=+1XXXXXXXXXX
+TWILIO_PHONE_NUMBER=+1XXXXXXXXXX               # Fallback caller ID if a user has no assigned number
 TWILIO_API_KEY=SKxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 TWILIO_API_SECRET=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 TWILIO_TWIML_APP_SID=APxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+# Transcription
+DEEPGRAM_API_KEY=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+TRANSCRIPTION_PROVIDER=deepgram                # deepgram or groq_whisper
 
 # AI Providers
 GROQ_API_KEY=gsk_xxxxxxxxxxxxxxxxxxxxxxxxxxxx
 OPENAI_API_KEY=sk-proj-xxxxxxxxxxxxxxxx       # Optional
 AI_PROVIDER=groq                               # groq or openai
+GROQ_MODEL=openai/gpt-oss-120b                 # Main model for analysis/coaching/classification agents
+GROQ_FAST_MODEL=openai/gpt-oss-20b             # Low-latency gate model in the suggestion agent
+OPENAI_MODEL=gpt-4o
+
+# Auth
+JWT_SECRET_KEY=change-this-secret-key          # Set a real secret before any non-local use
+JWT_ALGORITHM=HS256
+ACCESS_TOKEN_EXPIRE_MINUTES=720
+BOOTSTRAP_ADMIN_NAME=Admin
+BOOTSTRAP_ADMIN_EMAIL=admin@outboundai.local
+BOOTSTRAP_ADMIN_PASSWORD=ChangeMe123!           # Change this after first login
 
 # Database
 MONGO_URI=mongodb://localhost:27017
@@ -656,7 +782,7 @@ MONGO_DB_NAME=outbound_calls
 BASE_URL=https://xxxx-xx-xx-xx-xx.ngrok-free.app
 ```
 
-> **Note:** Never commit your `.env` file. It's already in `.gitignore`.
+> **Note:** Never commit your `.env` file. It's already in `.gitignore`. `frontend/.env` is only needed to override the API base URL in unusual setups — pointing it at the wrong backend process is a known footgun (see `CODING_STANDARDS.md`/`SESSION_LOG.md`), so leave it unset unless you have a specific reason.
 
 ---
 
@@ -679,5 +805,5 @@ This project is open source and available under the [MIT License](LICENSE).
 ---
 
 <p align="center">
-  Built with ❤️ using FastAPI, React, Twilio, and Groq AI
+  Built with ❤️ using FastAPI, React, Twilio, Deepgram, and Groq/OpenAI
 </p>

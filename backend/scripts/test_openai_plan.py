@@ -12,10 +12,10 @@ Usage (from backend/, venv active) - either works:
     python scripts/test_openai_plan.py
 """
 
-import sys
 import asyncio
 import json
 import logging
+import sys
 from pathlib import Path
 
 # Makes `app` importable regardless of how this script is invoked - running
@@ -24,13 +24,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)-7s | %(message)s")
 
-from app.services.ai_service import _get_openai
-from app.services.suggestion_agent import SYSTEM_PROMPT, _parse_suggestion
+from app.ai.prompts.suggestion_prompts import build_coaching_messages
+from app.ai.providers.factory import get_provider
+from app.ai.schemas.suggestion import Suggestion
 
 OPENAI_MODEL = "gpt-4o"  # the model the app uses when AI_PROVIDER=openai
 
 # A realistic mid-call transcript tail, shaped exactly like what
-# _run_agent_once() builds from active_calls[call_id]["transcript"].
+# _run_agent_once() builds from the active call store's ["transcript"].
 SAMPLE_TRANSCRIPT_TAIL = """[You]: Hi Ravi, thanks for taking the time today.
 [Ravi]: Sure, no problem. What's this about?
 [You]: We help banks streamline their loan approval process with AI.
@@ -44,12 +45,10 @@ async def minimal_sanity_check() -> bool:
     before spending tokens on the full realistic reproduction below."""
     print("--- Test 1: minimal sanity check (gpt-4o-mini, 5 tokens) ---")
     try:
-        response = await _get_openai().chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": "Say OK"}],
-            max_tokens=5,
+        response = await get_provider("openai").complete(
+            [{"role": "user", "content": "Say OK"}], model="gpt-4o-mini", max_tokens=5
         )
-        print(f"PASS - response: {response.choices[0].message.content!r}\n")
+        print(f"PASS - response: {response.content!r}\n")
         return True
     except Exception as e:
         print(f"FAIL - {type(e).__name__}: {e}\n")
@@ -60,35 +59,19 @@ async def realistic_suggestion_call() -> bool:
     """Reproduces the exact request _run_agent_once() sends to OpenAI during
     a real call - same prompt template, same params, same parser."""
     print(f"--- Test 2: realistic in-call suggestion request ({OPENAI_MODEL}) ---")
-    messages = [
-        {
-            "role": "system",
-            "content": SYSTEM_PROMPT.format(
-                contact_name="Ravi",
-                company_part=" from FinEdge",
-                elapsed="1m30s",
-                project_context="",
-            ),
-        },
-        {
-            "role": "user",
-            "content": f"Live transcript (most recent last):\n\n{SAMPLE_TRANSCRIPT_TAIL}\n\nProvide your coaching suggestion now.",
-        },
-    ]
+    messages = build_coaching_messages(
+        contact_name="Ravi",
+        company_part=" from FinEdge",
+        elapsed="1m30s",
+        project_context="",
+        transcript_tail=SAMPLE_TRANSCRIPT_TAIL,
+    )
     try:
-        response = await _get_openai().chat.completions.create(
-            model=OPENAI_MODEL,
-            messages=messages,
-            temperature=0.3,
-            max_tokens=600,
-            response_format={"type": "json_object"},
+        suggestion = await get_provider("openai").complete_structured(
+            messages, Suggestion, model=OPENAI_MODEL, temperature=0.3, max_tokens=600
         )
-        suggestion = _parse_suggestion(response.choices[0].message.content)
-        if not suggestion:
-            print("FAIL - call succeeded but response didn't parse as a valid suggestion\n")
-            return False
         print("PASS - parsed suggestion:")
-        print(json.dumps(suggestion, indent=2))
+        print(json.dumps(suggestion.model_dump(), indent=2))
         print()
         return True
     except Exception as e:

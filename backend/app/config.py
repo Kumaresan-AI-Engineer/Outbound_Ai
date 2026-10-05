@@ -22,8 +22,26 @@ class Settings(BaseSettings):
     whisper_device: str = "cpu"  # "cpu" or "cuda"
     ai_provider: str = "groq"  # "groq" or "openai"
     transcription_provider: str = "deepgram"  # "deepgram" or "groq_whisper"
+
+    # Model used for every Groq-backed agent call (analysis, domain
+    # classification, project extraction, main in-call coaching) and the
+    # OpenAI equivalent when ai_provider="openai" or a caller requests it
+    # explicitly. groq_fast_model is only used by the suggestion agent's
+    # low-latency project-intent gate, which always talks to Groq regardless
+    # of ai_provider.
+    groq_model: str = "openai/gpt-oss-120b"
+    groq_fast_model: str = "openai/gpt-oss-20b"
+    openai_model: str = "gpt-4o"
     suggestion_agent_enabled: bool = True
     base_url: str = "http://localhost:8080"
+
+    jwt_secret_key: str = "change-this-secret-key"
+    jwt_algorithm: str = "HS256"
+    access_token_expire_minutes: int = 720
+
+    bootstrap_admin_name: str = "Admin"
+    bootstrap_admin_email: str = "admin@outboundai.local"
+    bootstrap_admin_password: str = "ChangeMe123!"
 
     class Config:
         env_file = str(BACKEND_DIR / ".env")

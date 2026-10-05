@@ -9,7 +9,14 @@ websockets==13.0
 deepgram-sdk==3.7.0
 openai==1.50.0
 groq==0.11.0
+# openai==1.50.0 / groq==0.11.0 construct their internal httpx client with a
+# `proxies` kwarg that httpx>=0.28 removed - pin below that to keep both
+# AI providers working until they're upgraded together.
+httpx==0.27.2
 python-multipart==0.0.9
+PyJWT==2.9.0
+passlib[bcrypt]==1.7.4
+bcrypt==4.0.1
 faster-whisper==1.1.0
 numpy>=1.24.0
 openpyxl==3.1.5

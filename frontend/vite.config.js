@@ -9,6 +9,9 @@ export default defineConfig({
     // so allow the whole ngrok-free.dev domain rather than one host).
     allowedHosts: ['.ngrok-free.dev'],
     proxy: {
+      '/auth': 'http://localhost:8080',
+      '/users': 'http://localhost:8080',
+      '/twilio-numbers': 'http://localhost:8080',
       '/contacts': 'http://localhost:8080',
       '/clients': 'http://localhost:8080',
       '/projects': 'http://localhost:8080',

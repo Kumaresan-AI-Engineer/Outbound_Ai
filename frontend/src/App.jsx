@@ -1,21 +1,26 @@
 import { useState, useEffect, useRef } from 'react';
-import Navbar from './components/Navbar';
-import Dashboard from './components/Dashboard';
-import ContactTable from './components/ContactTable';
-import CallPanel from './components/CallPanel';
-import CallHistory from './components/CallHistory';
-import SettingsPanel from './components/SettingsPanel';
-import ProjectsPanel from './components/ProjectsPanel';
-import PowerDialerBar from './components/PowerDialerBar';
-import PowerDialerSummary from './components/PowerDialerSummary';
-import { useTwilioDevice } from './hooks/useTwilioDevice';
-import { usePowerDialer } from './hooks/usePowerDialer';
-import { useDialer } from './hooks/useDialer';
+import Navbar from './shared/components/Navbar';
+import Dashboard from './features/dashboard/components/Dashboard';
+import ContactTable from './features/contacts/components/ContactTable';
+import CallPanel from './features/calls/components/CallPanel';
+import CallHistory from './features/history/components/CallHistory';
+import SettingsPanel from './features/settings/components/SettingsPanel';
+import ProjectsPanel from './features/projects/components/ProjectsPanel';
+import PowerDialerBar from './features/calls/components/PowerDialerBar';
+import PowerDialerSummary from './features/calls/components/PowerDialerSummary';
+import Login from './features/auth/components/Login';
+import UserManagement from './features/admin/components/UserManagement';
+import TwilioNumbersPanel from './features/admin/components/TwilioNumbersPanel';
+import { useTwilioDevice } from './features/calls/hooks/useTwilioDevice';
+import { usePowerDialer } from './features/calls/hooks/usePowerDialer';
+import { useDialer } from './features/calls/hooks/useDialer';
+import { useAuth } from './features/auth/context/authContextBase';
 
 const DEVICE_FREE_STATES = ['disconnected', 'idle'];
 const MANUAL_CALL_TIMEOUT_MS = 25000; // absolute upper bound before a hung manual call is treated as failed
 
 function App() {
+  const { user, loading, logout } = useAuth();
   const [activePage, setActivePage] = useState('dashboard');
   const [activeCall, setActiveCall] = useState(null);
   const [historyRefreshKey, setHistoryRefreshKey] = useState(0);
@@ -38,7 +43,7 @@ function App() {
   const answeredCallIdsRef = useRef(new Set());
   const manualCallTimeoutRef = useRef(null);
 
-  useEffect(() => { initDevice(); }, [initDevice]);
+  useEffect(() => { if (user) initDevice(); }, [initDevice, user]);
 
   // The fast, event-driven "Device is free" signal - drives the queue's
   // auto-advance. Safe to call unconditionally: usePowerDialer no-ops this
@@ -157,9 +162,18 @@ function App() {
     ? `${powerDialer.currentIndex + 1} of ${powerDialer.contacts.length}`
     : undefined;
 
+  if (loading) return null;
+  if (!user) return <Login />;
+
   return (
     <div className="min-h-screen bg-bg flex flex-col">
-      <Navbar activePage={activePage} onNavigate={setActivePage} deviceReady={deviceReady} />
+      <Navbar
+        activePage={activePage}
+        onNavigate={setActivePage}
+        deviceReady={deviceReady}
+        user={user}
+        onLogout={logout}
+      />
       {powerDialer.sessionActive && (
         <PowerDialerBar
           contacts={powerDialer.contacts}
@@ -185,6 +199,8 @@ function App() {
         {activePage === 'projects' && <ProjectsPanel />}
         {activePage === 'history' && <CallHistory key={historyRefreshKey} />}
         {activePage === 'settings' && <SettingsPanel />}
+        {activePage === 'users' && user.role === 'admin' && <UserManagement />}
+        {activePage === 'numbers' && user.role === 'admin' && <TwilioNumbersPanel />}
       </main>
 
       {activeCall && (

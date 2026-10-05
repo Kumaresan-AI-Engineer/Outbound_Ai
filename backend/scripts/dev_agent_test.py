@@ -7,18 +7,19 @@ If contact_id is omitted, the first contact in the DB is used.
 --no-prefetch skips cache warming to exercise the live-Mongo tool fallback.
 """
 
-import sys
-import json
 import asyncio
+import json
 import logging
+import sys
 from datetime import datetime
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)-7s | %(message)s")
 
 from bson import ObjectId
-from app.routers.ws import active_calls
-from app.database import contacts_collection
-from app.services.suggestion_agent import prefetch_context, _run_agent_once
+
+from app.ai.agents.suggestion_agent import _run_agent_once, prefetch_context
+from app.domain.calls.state import active_call_store
+from app.repositories.contacts_repo import contacts_repo
 
 CANNED_LINES = [
     "[You]: Hi, this is Sarah from ABC Solutions, am I speaking with {name}?",
@@ -35,9 +36,9 @@ async def main():
     no_prefetch = "--no-prefetch" in sys.argv
 
     if args:
-        contact = await contacts_collection.find_one({"_id": ObjectId(args[0])})
+        contact = await contacts_repo.find_one({"_id": ObjectId(args[0])})
     else:
-        contact = await contacts_collection.find_one()
+        contact = await contacts_repo.find_one()
     if not contact:
         print("No contact found - add a contact first or pass a contact_id")
         return
@@ -48,19 +49,22 @@ async def main():
     print(f"Prefetch: {'OFF (live tool fallback)' if no_prefetch else 'ON'}\n")
 
     call_id = "dev-test"
-    active_calls[call_id] = {
-        "frontend_ws": None,
-        "transcript": "\n".join(line.format(name=name) for line in CANNED_LINES),
-        "suggestions": [],
-        "contact_name": name,
-        "contact_id": contact_id,
-        "interims": {},
-        "started_at": datetime.utcnow(),
-        "agent_cache": None,
-        "agent_pending": "we already use a competitor tool and our budget is frozen this quarter",
-        "agent_running": False,
-        "agent_dirty": False,
-    }
+    active_call_store.set(
+        call_id,
+        {
+            "frontend_ws": None,
+            "transcript": "\n".join(line.format(name=name) for line in CANNED_LINES),
+            "suggestions": [],
+            "contact_name": name,
+            "contact_id": contact_id,
+            "interims": {},
+            "started_at": datetime.utcnow(),
+            "agent_cache": None,
+            "agent_pending": "we already use a competitor tool and our budget is frozen this quarter",
+            "agent_running": False,
+            "agent_dirty": False,
+        },
+    )
 
     if not no_prefetch:
         await prefetch_context(call_id, contact_id)
