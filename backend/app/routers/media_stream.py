@@ -1,13 +1,15 @@
-import json
-import base64
 import asyncio
+import base64
+import json
 import logging
+
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+
+from app.ai.agents.suggestion_agent import maybe_trigger_suggestion
 from app.config import get_settings
-from app.routers.ws import active_calls
-from app.services.whisper_service import transcribe_audio_bytes
+from app.domain.calls.state import active_call_store
 from app.services.deepgram_service import DeepgramTranscriber
-from app.services.suggestion_agent import maybe_trigger_suggestion
+from app.services.whisper_service import transcribe_audio_bytes
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -37,8 +39,14 @@ def _append_final(call_data: dict, speaker: str, text: str):
 
 def _make_on_transcript(call_id: str, track: str):
     async def on_transcript(text: str, is_final: bool, speech_final: bool):
-        call_data = active_calls.get(call_id)
+        # TEMP DIAGNOSTIC - shapes only, never the spoken text itself
+        logger.info(
+            f"[MEDIA STREAM-DEBUG] on_transcript call={call_id} track={track} "
+            f"is_final={is_final} speech_final={speech_final} text_len={len(text)}"
+        )
+        call_data = active_call_store.get(call_id)
         if not call_data:
+            logger.warning(f"[MEDIA STREAM-DEBUG] on_transcript fired but no active_call_store entry for {call_id}")
             return
         speaker = _speaker_for(call_data, track)
         if is_final and text:
@@ -52,6 +60,7 @@ def _make_on_transcript(call_id: str, track: str):
         # The contact finished an utterance -> let the agent react
         if track == "outbound" and speech_final:
             maybe_trigger_suggestion(call_id)
+
     return on_transcript
 
 
@@ -72,13 +81,13 @@ async def media_stream(websocket: WebSocket, call_id: str):
     reconnect_attempts = {"inbound": 0, "outbound": 0}
     buffers = {"inbound": bytearray(), "outbound": bytearray()}
     transcribing = set()
+    # TEMP DIAGNOSTIC - confirms Twilio is actually sending audio frames per track
+    frame_counts = {"inbound": 0, "outbound": 0}
 
     async def start_deepgram() -> bool:
         try:
             for track in ("inbound", "outbound"):
-                transcribers[track] = DeepgramTranscriber(
-                    on_transcript=_make_on_transcript(call_id, track)
-                )
+                transcribers[track] = DeepgramTranscriber(on_transcript=_make_on_transcript(call_id, track))
             await asyncio.gather(*(t.connect() for t in transcribers.values()))
             return True
         except Exception as e:
@@ -112,6 +121,14 @@ async def media_stream(websocket: WebSocket, call_id: str):
                     continue
                 audio_bytes = base64.b64decode(payload)
 
+                # TEMP DIAGNOSTIC
+                frame_counts[track] = frame_counts.get(track, 0) + 1
+                if frame_counts[track] % 100 == 0:
+                    logger.info(
+                        f"[MEDIA STREAM-DEBUG] call={call_id} track={track} "
+                        f"frames_received={frame_counts[track]} mode={mode}"
+                    )
+
                 if mode == "deepgram":
                     t = transcribers.get(track)
                     if t and not t.is_running:
@@ -139,12 +156,13 @@ async def media_stream(websocket: WebSocket, call_id: str):
                     audio_data = bytes(buffers[track])
                     buffers[track] = bytearray()
                     transcribing.add(track)
-                    asyncio.create_task(
-                        _transcribe_and_update(call_id, track, audio_data, transcribing)
-                    )
+                    asyncio.create_task(_transcribe_and_update(call_id, track, audio_data, transcribing))
 
             elif event == "stop":
-                logger.info(f"[MEDIA STREAM] Stream stopped for call {call_id}")
+                logger.info(
+                    f"[MEDIA STREAM] Stream stopped for call {call_id} "
+                    f"(frames: inbound={frame_counts.get('inbound', 0)} outbound={frame_counts.get('outbound', 0)})"
+                )
                 break
 
     except WebSocketDisconnect:
@@ -154,7 +172,7 @@ async def media_stream(websocket: WebSocket, call_id: str):
     finally:
         for t in transcribers.values():
             await t.close()
-        call_data = active_calls.get(call_id)
+        call_data = active_call_store.get(call_id)
         if call_data:
             call_data.get("interims", {}).clear()
         for track, buf in buffers.items():
@@ -169,7 +187,7 @@ async def _transcribe_and_update(call_id: str, track: str, audio_bytes: bytes, t
         if not text:
             return
 
-        call_data = active_calls.get(call_id)
+        call_data = active_call_store.get(call_id)
         if not call_data:
             return
 

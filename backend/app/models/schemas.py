@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 from datetime import datetime
 from enum import Enum
 
@@ -38,6 +38,7 @@ class ContactResponse(BaseModel):
     status: ContactStatus
     notes: str
     last_called: Optional[datetime] = None
+    assigned_to: Optional[str] = None
     created_at: datetime
 
 
@@ -56,6 +57,7 @@ class CallLogResponse(BaseModel):
     transcript: str = ""
     suggestions: list[Any] = []
     analysis: Optional[dict] = None
+    user_id: Optional[str] = None
     created_at: datetime
 
 
@@ -109,4 +111,80 @@ class ProjectResponse(BaseModel):
     processing_status: ProcessingStatus
     processing_error: Optional[str] = None
     metadata: Optional[dict] = None
+    created_at: datetime
+
+
+class UserRole(str, Enum):
+    admin = "admin"
+    sales = "sales"
+
+
+class UserCreate(BaseModel):
+    name: str
+    email: str
+    password: str
+    role: UserRole = UserRole.sales
+
+
+class UserUpdate(BaseModel):
+    name: Optional[str] = None
+    email: Optional[str] = None
+    password: Optional[str] = None
+    role: Optional[UserRole] = None
+    is_active: Optional[bool] = None
+
+
+class AssignedNumberSummary(BaseModel):
+    id: str
+    phone_number: str
+    label: str = ""
+
+
+class UserResponse(BaseModel):
+    id: str
+    name: str
+    email: str
+    role: UserRole
+    is_active: bool
+    assigned_numbers: list[AssignedNumberSummary] = []
+    created_at: datetime
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user: UserResponse
+
+
+class TwilioNumberCreate(BaseModel):
+    phone_number: str
+    label: str = ""
+
+
+class TwilioNumberUpdate(BaseModel):
+    label: Optional[str] = None
+    is_active: Optional[bool] = None
+
+
+class TwilioNumberAssign(BaseModel):
+    user_id: str
+    action: Literal["add", "remove"] = "add"
+
+
+class AssignedUserSummary(BaseModel):
+    id: str
+    name: str
+
+
+class TwilioNumberResponse(BaseModel):
+    id: str
+    phone_number: str
+    label: str = ""
+    is_active: bool
+    assigned_users: list[AssignedUserSummary] = []
     created_at: datetime

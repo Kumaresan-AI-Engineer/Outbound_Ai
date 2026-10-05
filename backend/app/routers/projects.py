@@ -4,21 +4,27 @@ import re
 import uuid
 from datetime import datetime
 from pathlib import Path
-from fastapi import APIRouter, HTTPException, UploadFile, File
+
 from bson import ObjectId
-from app.database import projects_collection, clients_collection
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+
+from app.ai.agents.project_extraction_agent import process_project
+from app.ai.schemas.project_extraction import CANONICAL_DOMAINS
+from app.core.security import get_current_user
+from app.core.timezone import get_request_timezone, to_tz
 from app.models.schemas import ProjectResponse
+from app.repositories.clients_repo import clients_repo
+from app.repositories.projects_repo import projects_repo
 from app.services.document_service import ALLOWED_EXTENSIONS, MAX_FILE_SIZE
-from app.services.project_agent import process_project, CANONICAL_DOMAINS
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/projects", tags=["projects"])
+router = APIRouter(prefix="/projects", tags=["projects"], dependencies=[Depends(get_current_user)])
 
 UPLOAD_DIR = Path(__file__).resolve().parent.parent.parent / "uploads" / "projects"
 
 
-def serialize_project(doc) -> dict:
+def serialize_project(doc, tz_name: str = "UTC") -> dict:
     return {
         "id": str(doc["_id"]),
         "name": doc.get("name", ""),
@@ -28,12 +34,12 @@ def serialize_project(doc) -> dict:
         "processing_status": doc.get("processing_status", "processing"),
         "processing_error": doc.get("processing_error"),
         "metadata": doc.get("metadata"),
-        "created_at": doc.get("created_at", datetime.utcnow()),
+        "created_at": to_tz(doc.get("created_at", datetime.utcnow()), tz_name),
     }
 
 
 @router.post("/upload", response_model=ProjectResponse)
-async def upload_project(file: UploadFile = File(...)):
+async def upload_project(file: UploadFile = File(...), tz_name: str = Depends(get_request_timezone)):
     """Upload a project document (PDF/Word). Text extraction and AI analysis
     run in the background — poll GET /projects/ for processing_status."""
     ext = Path(file.filename or "").suffix.lower()
@@ -67,19 +73,19 @@ async def upload_project(file: UploadFile = File(...)):
         "created_at": datetime.utcnow(),
         "updated_at": datetime.utcnow(),
     }
-    result = await projects_collection.insert_one(doc)
+    result = await projects_repo.insert_one(doc)
     doc["_id"] = result.inserted_id
 
     asyncio.create_task(process_project(str(result.inserted_id)))
     logger.info(f"[PROJECTS] Uploaded '{doc['file_name']}' → processing started")
-    return serialize_project(doc)
+    return serialize_project(doc, tz_name)
 
 
 @router.get("/", response_model=list[ProjectResponse])
-async def get_projects():
+async def get_projects(tz_name: str = Depends(get_request_timezone)):
     projects = []
-    async for doc in projects_collection.find().sort("created_at", -1):
-        projects.append(serialize_project(doc))
+    async for doc in projects_repo.find().sort("created_at", -1):
+        projects.append(serialize_project(doc, tz_name))
     return projects
 
 
@@ -87,43 +93,40 @@ async def get_projects():
 async def get_knowledge_graph():
     """Projects grouped by domain — powers the knowledge map."""
     domains: dict = {}
-    async for doc in projects_collection.find({"processing_status": "completed"}).sort("created_at", -1):
+    async for doc in projects_repo.find({"processing_status": "completed"}).sort("created_at", -1):
         meta = doc.get("metadata", {}) or {}
         domain = meta.get("domain") or "Other"
-        domains.setdefault(domain, []).append({
-            "id": str(doc["_id"]),
-            "name": doc.get("name", ""),
-            "summary": meta.get("summary", ""),
-            "technologies": meta.get("technologies", [])[:6],
-            "related_domains": meta.get("related_domains", []),
-            "has_ai": bool(meta.get("ai_ml_components")),
-        })
+        domains.setdefault(domain, []).append(
+            {
+                "id": str(doc["_id"]),
+                "name": doc.get("name", ""),
+                "summary": meta.get("summary", ""),
+                "technologies": meta.get("technologies", [])[:6],
+                "related_domains": meta.get("related_domains", []),
+                "has_ai": bool(meta.get("ai_ml_components")),
+            }
+        )
 
     ordered = [d for d in CANONICAL_DOMAINS if d in domains]
-    return {
-        "domains": [
-            {"domain": d, "count": len(domains[d]), "projects": domains[d]}
-            for d in ordered
-        ]
-    }
+    return {"domains": [{"domain": d, "count": len(domains[d]), "projects": domains[d]} for d in ordered]}
 
 
 @router.get("/{project_id}", response_model=ProjectResponse)
-async def get_project(project_id: str):
+async def get_project(project_id: str, tz_name: str = Depends(get_request_timezone)):
     if not ObjectId.is_valid(project_id):
         raise HTTPException(status_code=404, detail="Project not found")
-    doc = await projects_collection.find_one({"_id": ObjectId(project_id)})
+    doc = await projects_repo.find_one({"_id": ObjectId(project_id)})
     if not doc:
         raise HTTPException(status_code=404, detail="Project not found")
-    return serialize_project(doc)
+    return serialize_project(doc, tz_name)
 
 
 @router.post("/{project_id}/reprocess", response_model=ProjectResponse)
-async def reprocess_project(project_id: str):
+async def reprocess_project(project_id: str, tz_name: str = Depends(get_request_timezone)):
     """Retry AI processing for a failed (or stuck) project."""
     if not ObjectId.is_valid(project_id):
         raise HTTPException(status_code=404, detail="Project not found")
-    doc = await projects_collection.find_one_and_update(
+    doc = await projects_repo.find_one_and_update(
         {"_id": ObjectId(project_id)},
         {"$set": {"processing_status": "processing", "processing_error": None}},
         return_document=True,
@@ -131,14 +134,14 @@ async def reprocess_project(project_id: str):
     if not doc:
         raise HTTPException(status_code=404, detail="Project not found")
     asyncio.create_task(process_project(project_id))
-    return serialize_project(doc)
+    return serialize_project(doc, tz_name)
 
 
 @router.delete("/{project_id}")
 async def delete_project(project_id: str):
     if not ObjectId.is_valid(project_id):
         raise HTTPException(status_code=404, detail="Project not found")
-    doc = await projects_collection.find_one_and_delete({"_id": ObjectId(project_id)})
+    doc = await projects_repo.find_one_and_delete({"_id": ObjectId(project_id)})
     if not doc:
         raise HTTPException(status_code=404, detail="Project not found")
 
@@ -149,7 +152,7 @@ async def delete_project(project_id: str):
             path.unlink()
     except OSError as e:
         logger.warning(f"[PROJECTS] Could not delete file for {project_id}: {e}")
-    await clients_collection.update_many(
+    await clients_repo.update_many(
         {"matched_project_ids": project_id},
         {"$pull": {"matched_project_ids": project_id}},
     )

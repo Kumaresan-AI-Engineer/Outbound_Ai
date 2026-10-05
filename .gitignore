@@ -9,3 +9,10 @@ venv/
 backend/uploads/
 .DS_Store
 .claude/
+
+# Internal AI-assisted-dev process docs - local reference only, not published
+/CLAUDE.md
+/CODING_STANDARDS.md
+/SESSION_LOG.md
+/MANUAL_TEST_PLAN.md
+REFACTOR_PROMPT.md
